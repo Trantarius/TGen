@@ -12,8 +12,20 @@ import PIL
 from sys import getsizeof as sizeof
 from math import *
 
-IMG_SIZE=512
+#in pixels (AKA simulation units)
+#affects the size of the area simulated, not the accuracy
+IMG_SIZE=1024
+#maximum, in sim units
+PERIOD=1024
+#modifier, unitless
+SLOPE=1
 SIM_STEPS=10000
+#modifier, lower increases stability
+SIM_RATE=0.25
+
+#in sim units
+VERT_RANGE= IMG_SIZE*SLOPE*IMG_SIZE/(PERIOD*8)
+print("VERT_RANGE: {:.0f}".format(VERT_RANGE))
 
 BUF_SHAPE=(2,IMG_SIZE,IMG_SIZE)
 BUF_LAND=0
@@ -42,7 +54,7 @@ def draw():
 
     water_cmap = matplotlib.colors.LinearSegmentedColormap.from_list('water_cmap',[(0,0,1,0),(0,0,1,1)])
 
-    land_img_ax = plt.imshow(np.zeros((IMG_SIZE,IMG_SIZE),dtype=NPFLOAT), cmap='gray', vmin=0, vmax=100)
+    land_img_ax = plt.imshow(np.zeros((IMG_SIZE,IMG_SIZE),dtype=NPFLOAT), cmap='gray', vmin=0, vmax=VERT_RANGE)
     water_img_ax = plt.imshow(np.zeros((IMG_SIZE,IMG_SIZE),dtype=NPFLOAT), cmap=water_cmap, vmin=0, vmax=1)
 
     while(not stop_drawing.is_set()):
@@ -54,7 +66,6 @@ def draw():
             draw_ready.set()
             fig.canvas.flush_events()
             fig.canvas.draw_idle()
-    gen_pipe.close()
 
 draw_proc=mp.Process(target=draw)
 draw_proc.daemon=True
@@ -79,25 +90,25 @@ def swap_buffers():
     cl.enqueue_copy(queue, current_buf, next_buf)
 
 start=timer()
-krn['fractal_warp_noisefill'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, NPFLOAT(random.random()*(1<<10)), NPFLOAT(1), NPFLOAT(1))
+krn['fractal_warp_noisefill'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, NPFLOAT(random.random()*(1<<10)), NPFLOAT(1.0/PERIOD), NPFLOAT(1))
 cl.enqueue_copy(queue,host_buf,current_buf)
-print("noisegen {:0.4f}s".format(timer()-start))
 krn['map_range'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, 
-    NPFLOAT(np.min(host_buf)), NPFLOAT(np.max(host_buf)), NPFLOAT(0), NPFLOAT(100))
+    NPFLOAT(np.min(host_buf)), NPFLOAT(np.max(host_buf)), NPFLOAT(0), NPFLOAT(VERT_RANGE))
 cl.enqueue_copy(queue, next_buf, current_buf)
-queue.flush()
+print("noisegen {:0.4f}s".format(timer()-start))
 
-step_times = []
+total_step_time = 0
+total_steps = 0
 very_start=timer()
 for step in range(SIM_STEPS):
     start=timer()
     if(should_close.is_set()):
         break
 
-    #krn['gravity'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf, NPFLOAT(0.5), NPFLOAT(0.1))
-    krn['hydro_precip'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf, NPFLOAT(0.01))
+    krn['gravity'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf, NPFLOAT(1), NPFLOAT(0.1 * SIM_RATE))
+    krn['hydro_precip'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf, NPFLOAT(0.01 * SIM_RATE))
     swap_buffers()
-    krn['hydro_flow'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf)
+    krn['hydro_flow'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf, NPFLOAT(SIM_RATE))
     swap_buffers()
     krn['hydro_sink'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf, NPFLOAT(1))
     swap_buffers()
@@ -105,7 +116,8 @@ for step in range(SIM_STEPS):
     
     queue.finish()
     elapsed=timer()-start
-    step_times.append(elapsed)
+    total_step_time+=elapsed
+    total_steps+=1
     print('\r',' '*50,end='')
     print('\rstep {}\t{:0.4f}s'.format(step,elapsed),end='')
 
@@ -116,13 +128,13 @@ for step in range(SIM_STEPS):
         draw_ready.clear()
 
 total_elapsed = timer()-very_start
-print('\navg step time: {:0.4f}s'.format(np.average(step_times)))
+print('\navg step time: {:0.4f}s'.format(total_step_time/total_steps))
 print('total time: {:0.4f}s'.format(total_elapsed))
-print('overhead: {:0.4f}s'.format(total_elapsed-np.sum(step_times)))
+print('overhead: {:0.4f}s'.format(total_elapsed-total_step_time))
 
 imdata = np.zeros((IMG_SIZE,IMG_SIZE),dtype=np.int32)
 imbuf = cl.Buffer(ctx, mf.READ_WRITE | mf.COPY_HOST_PTR, hostbuf=imdata)
-krn['map_range'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, NPFLOAT(0), NPFLOAT(100), NPFLOAT(0), NPFLOAT(1))
+krn['map_range'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, NPFLOAT(0), NPFLOAT(VERT_RANGE), NPFLOAT(0), NPFLOAT(1))
 krn['to_int32'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, imbuf)
 cl.enqueue_copy(queue, imdata, imbuf)
 

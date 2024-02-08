@@ -107,7 +107,7 @@ void sync_float_add(volatile global FLOAT* p, FLOAT val){
     }
 }
 
-kernel void hydro_flow(global const FLOAT* input, global FLOAT* output){
+kernel void hydro_flow(global const FLOAT* input, global FLOAT* output, const FLOAT rate){
     const long2 coord = (long2)(get_global_id(0), get_global_id(1));
     const long2 size = (long2)(get_global_size(0), get_global_size(1));
     const long id = coord.y * size.x + coord.x;
@@ -117,9 +117,6 @@ kernel void hydro_flow(global const FLOAT* input, global FLOAT* output){
     const FLOAT alt = input[id] + input_water[id];
 
     FLOAT total_desired=0;
-    //one of the downhill tiles is needed to calculate the final flow amount;
-    // an arbitrary one is chosen as 'canary'
-    FLOAT canary = NAN;
     for(long dx=-1;dx<=1;dx++){
         for(long dy=-1;dy<=1;dy++){
             const long2 h = coord + (long2)(dx,dy);
@@ -133,23 +130,13 @@ kernel void hydro_flow(global const FLOAT* input, global FLOAT* output){
             }
 
             const FLOAT dmod = (FLOAT)1 / length((FLOAT2)(dx,dy));
-            const FLOAT desired_flow = dmod * (alt-h_alt)/2;
-            canary = desired_flow;
+            const FLOAT desired_flow = rate * dmod * (alt-h_alt)/2;
             total_desired += desired_flow;
         }
     }
 
-    FLOAT flow_amount;
-    if(canary==NAN){
-        return;//there are no downhill neighbors, no water will flow
-    }
-    else{
-        const FLOAT canary_p = canary/total_desired;
-        flow_amount = canary / (canary_p + 1);
-        //can't flow what doesn't exist
-        flow_amount = min(flow_amount, input_water[id]);
-        sync_float_add(output_water+id, -flow_amount);
-    }
+    FLOAT flow_amount = min(total_desired, input_water[id]);
+    sync_float_add(output_water+id, -flow_amount);
     
     for(long dx=-1;dx<=1;dx++){
         for(long dy=-1;dy<=1;dy++){
@@ -165,7 +152,7 @@ kernel void hydro_flow(global const FLOAT* input, global FLOAT* output){
             }
 
             const FLOAT dmod = (FLOAT)1 / length((FLOAT2)(dx,dy));
-            const FLOAT desired_flow = dmod * (alt-h_alt)/2;
+            const FLOAT desired_flow = rate * dmod * (alt-h_alt)/2;
             const FLOAT relegated_portion = desired_flow/total_desired;
             const FLOAT actual_flow = flow_amount * relegated_portion;
 

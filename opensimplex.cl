@@ -159,27 +159,27 @@ FLOAT fractal_warp_noise2(const FLOAT2 X, const FLOAT Z, const FLOAT min_f, cons
 }
 
 kernel void noisefill(global FLOAT* field, const FLOAT Z, const FLOAT freq){
-    FLOAT2 pos = (FLOAT2)(get_global_id(0),get_global_id(1)) / (FLOAT2)(get_global_size(0),get_global_size(1));
+    FLOAT2 pos = (FLOAT2)(get_global_id(0),get_global_id(1));
     long lin_id = get_global_id(1) * get_global_size(0) + get_global_id(0);
     field[lin_id] = noise2(pos*freq,Z);
 }
 
 kernel void warp_noisefill(global FLOAT* field, const FLOAT Z, const FLOAT freq, const FLOAT warp_strength){
-    FLOAT2 pos = (FLOAT2)(get_global_id(0),get_global_id(1)) / (FLOAT2)(get_global_size(0),get_global_size(1));
+    FLOAT2 pos = (FLOAT2)(get_global_id(0),get_global_id(1));
     long lin_id = get_global_id(1) * get_global_size(0) + get_global_id(0);
     field[lin_id] = warp_noise2(pos*freq,Z,warp_strength);
 }
 
 kernel void fractal_noisefill(global FLOAT* field, const FLOAT Z, const FLOAT freq){
-    FLOAT2 pos = (FLOAT2)(get_global_id(0),get_global_id(1)) / (FLOAT2)(get_global_size(0),get_global_size(1));
+    FLOAT2 pos = (FLOAT2)(get_global_id(0),get_global_id(1));
     long lin_id = get_global_id(1) * get_global_size(0) + get_global_id(0);
-    field[lin_id] = fractal_noise2(pos,Z,freq,max(get_global_size(0),get_global_size(1))/4);
+    field[lin_id] = fractal_noise2(pos,Z,freq,0.25);
 }
 
 kernel void fractal_warp_noisefill(global FLOAT* field, const FLOAT Z, const FLOAT freq, const FLOAT warp_strength){
-    FLOAT2 pos = (FLOAT2)(get_global_id(0),get_global_id(1)) / (FLOAT2)(get_global_size(0),get_global_size(1));
+    FLOAT2 pos = (FLOAT2)(get_global_id(0),get_global_id(1));
     long lin_id = get_global_id(1) * get_global_size(0) + get_global_id(0);
-    field[lin_id] = fractal_warp_noise2(pos,Z,freq,max(get_global_size(0),get_global_size(1))/4, warp_strength);
+    field[lin_id] = fractal_warp_noise2(pos,Z,freq,0.25, warp_strength);
 }
 
 
