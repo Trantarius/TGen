@@ -9,17 +9,24 @@ import multiprocess as mp
 import random
 from time import sleep
 import PIL
+from sys import getsizeof as sizeof
+from math import *
 
-IMG_SIZE=1024
-SIM_STEPS=500
-BUF_SHAPE=IMG_SIZE,IMG_SIZE
+IMG_SIZE=512
+SIM_STEPS=10000
+
+BUF_SHAPE=(2,IMG_SIZE,IMG_SIZE)
+BUF_LAND=0
+BUF_WATER=1
+BUF_SEDIMENT=2
 
 FLOAT='float'
 NPFLOAT=np.float32
 
-(draw_pipe,gen_pipe)=mp.Pipe()
+draw_queue = mp.Queue()
 should_close=mp.Event()
 stop_drawing=mp.Event()
+draw_ready = mp.Event()
 
 def draw():
 
@@ -32,77 +39,86 @@ def draw():
         should_close.set()
     fig.canvas.mpl_connect('close_event',on_close)
     plt.axis('off')
-    img_ax = plt.imshow(np.zeros((IMG_SIZE,IMG_SIZE),dtype=NPFLOAT), cmap='gray', vmin=0, vmax=100)
+
+    water_cmap = matplotlib.colors.LinearSegmentedColormap.from_list('water_cmap',[(0,0,1,0),(0,0,1,1)])
+
+    land_img_ax = plt.imshow(np.zeros((IMG_SIZE,IMG_SIZE),dtype=NPFLOAT), cmap='gray', vmin=0, vmax=100)
+    water_img_ax = plt.imshow(np.zeros((IMG_SIZE,IMG_SIZE),dtype=NPFLOAT), cmap=water_cmap, vmin=0, vmax=1)
 
     while(not stop_drawing.is_set()):
-        if(gen_pipe.poll()):
-            img=gen_pipe.recv()
-            img_ax.set_data(img)
+        if(not draw_queue.empty()):
+            img=draw_queue.get()
+            land_img_ax.set_data(img[0])
+            water_img_ax.set_data(img[1])
         else:
+            draw_ready.set()
             fig.canvas.flush_events()
             fig.canvas.draw_idle()
     gen_pipe.close()
 
 draw_proc=mp.Process(target=draw)
+draw_proc.daemon=True
 draw_proc.start()
 
 ctx = cl.create_some_context(interactive=False)
 queue = cl.CommandQueue(ctx)
 mf = cl.mem_flags
 
+start=timer()
 with open('main.cl','r') as maincl:
     prg = cl.Program(ctx, str(maincl.read())).build(options=[f'-DFLOAT={FLOAT}'])
 krn={}
 for kernel in prg.all_kernels():
     krn[kernel.function_name]=kernel
+print('kernel compilation: {:0.4f}s'.format(timer()-start))
 
-host_buf = np.zeros((IMG_SIZE,IMG_SIZE),dtype=NPFLOAT)
+host_buf = np.zeros(BUF_SHAPE,dtype=NPFLOAT)
 current_buf = cl.Buffer(ctx, mf.READ_WRITE | mf.COPY_HOST_PTR, hostbuf=host_buf)
 next_buf = cl.Buffer(ctx, mf.READ_WRITE | mf.COPY_HOST_PTR, hostbuf=host_buf)
 def swap_buffers():
-    global current_buf
-    global next_buf
-    tmp=current_buf
-    current_buf=next_buf
-    next_buf=tmp
+    cl.enqueue_copy(queue, current_buf, next_buf)
 
 start=timer()
 krn['fractal_warp_noisefill'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, NPFLOAT(random.random()*(1<<10)), NPFLOAT(1), NPFLOAT(1))
 cl.enqueue_copy(queue,host_buf,current_buf)
-print("noisegen ",timer()-start)
+print("noisegen {:0.4f}s".format(timer()-start))
 krn['map_range'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, 
     NPFLOAT(np.min(host_buf)), NPFLOAT(np.max(host_buf)), NPFLOAT(0), NPFLOAT(100))
+cl.enqueue_copy(queue, next_buf, current_buf)
 queue.flush()
 
-blur_conv = np.array([
-    [0,0,1,0,0],
-    [0,1,2,1,0],
-    [1,2,4,2,1],
-    [0,1,2,1,0],
-    [0,0,1,0,0]
-],dtype=NPFLOAT)
-blur_conv /= np.sum(blur_conv)
-blur_conv_buf = cl.Buffer(ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=blur_conv)
-
+step_times = []
+very_start=timer()
 for step in range(SIM_STEPS):
-    print('step ',step)
-
+    start=timer()
     if(should_close.is_set()):
         break
 
-    krn['flatten_slopes'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf, NPFLOAT(0.25))
-    
-    queue.flush()
+    #krn['gravity'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf, NPFLOAT(0.5), NPFLOAT(0.1))
+    krn['hydro_precip'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf, NPFLOAT(0.01))
+    swap_buffers()
+    krn['hydro_flow'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf)
+    swap_buffers()
+    krn['hydro_sink'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf, NPFLOAT(1))
     swap_buffers()
 
-    #send image to be drawn if the drawer is ready, or if on the last step
-    if(not gen_pipe.poll() or step==SIM_STEPS-1):
-        cl.enqueue_copy(queue,host_buf,current_buf)
-        draw_pipe.send(host_buf)
+    
+    queue.finish()
+    elapsed=timer()-start
+    step_times.append(elapsed)
+    print('\r',' '*50,end='')
+    print('\rstep {}\t{:0.4f}s'.format(step,elapsed),end='')
 
-#krn['map_range'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, 
-#    NPFLOAT(np.min(host_buf)), NPFLOAT(np.max(host_buf)), NPFLOAT(0), NPFLOAT(1))
-#cl.enqueue_copy(queue,host_buf,current_buf)
+    #send image to be drawn if the drawer is ready, or if on the last step
+    if(draw_ready.is_set() or step==SIM_STEPS-1):
+        cl.enqueue_copy(queue,host_buf,current_buf)
+        draw_queue.put(host_buf)
+        draw_ready.clear()
+
+total_elapsed = timer()-very_start
+print('\navg step time: {:0.4f}s'.format(np.average(step_times)))
+print('total time: {:0.4f}s'.format(total_elapsed))
+print('overhead: {:0.4f}s'.format(total_elapsed-np.sum(step_times)))
 
 imdata = np.zeros((IMG_SIZE,IMG_SIZE),dtype=np.int32)
 imbuf = cl.Buffer(ctx, mf.READ_WRITE | mf.COPY_HOST_PTR, hostbuf=imdata)
