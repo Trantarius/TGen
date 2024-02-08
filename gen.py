@@ -16,7 +16,7 @@ from math import *
 #affects the size of the area simulated, not the accuracy
 IMG_SIZE=1024
 #maximum, in sim units
-PERIOD=1024
+PERIOD=256
 #modifier, unitless
 SLOPE=1
 SIM_STEPS=10000
@@ -24,7 +24,7 @@ SIM_STEPS=10000
 SIM_RATE=0.25
 
 #in sim units
-VERT_RANGE= IMG_SIZE*SLOPE*IMG_SIZE/(PERIOD*8)
+VERT_RANGE= SLOPE*PERIOD/8
 print("VERT_RANGE: {:.0f}".format(VERT_RANGE))
 
 BUF_SHAPE=(2,IMG_SIZE,IMG_SIZE)
