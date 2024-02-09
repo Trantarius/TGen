@@ -134,7 +134,7 @@ FLOAT fractal_noise2(const FLOAT2 X, const FLOAT Z, const FLOAT min_f, const FLO
 
     while(o * min_f <= max_f){
         const FLOAT f = min_f * o;
-        n += noise2(X*f,z)/o;
+        n += noise2(X*f,z*f)/o;
         z += 2;//nodes are approx 1 unit apart, jump by 2 should be enough to be independent
         o *= 2;
     }
@@ -150,7 +150,7 @@ FLOAT fractal_warp_noise2(const FLOAT2 X, const FLOAT Z, const FLOAT min_f, cons
 
     while(o * min_f <= max_f){
         const FLOAT f = min_f * o;
-        n += warp_noise2(X*f, z, warp_strength)/o;
+        n += warp_noise2(X*f, z*f, warp_strength)/o;
         z += 8 + warp_strength;//needs extra padding for warp channels
         o *= 2;
     }
