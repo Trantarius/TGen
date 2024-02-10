@@ -11,6 +11,10 @@ from time import sleep
 import PIL
 from sys import getsizeof as sizeof
 from math import *
+import os 
+
+this_file_path = os.path.dirname(os.path.realpath(__file__))
+print(this_file_path)
 
 #in pixels (AKA simulation units)
 #affects the size of the area simulated, not the accuracy
@@ -73,13 +77,13 @@ draw_proc=mp.Process(target=draw)
 draw_proc.daemon=True
 draw_proc.start()
 
-ctx = cl.create_some_context(interactive=False)
+ctx = cl.create_some_context(interactive=True)
 queue = cl.CommandQueue(ctx)
 mf = cl.mem_flags
 
 start=timer()
 with open('main.cl','r') as maincl:
-    prg = cl.Program(ctx, str(maincl.read())).build(options=[f'-DFLOAT={FLOAT} -DIMG_SIZE={IMG_SIZE}'])
+    prg = cl.Program(ctx, str(maincl.read())).build(options=[f'-I{this_file_path} -DFLOAT={FLOAT} -cl-std=CL2.0 -g'])
 krn={}
 for kernel in prg.all_kernels():
     krn[kernel.function_name]=kernel
@@ -102,6 +106,8 @@ krn['map_range'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf,
 cl.enqueue_copy(queue, next_buf, current_buf)
 print("noisegen {:0.4f}s".format(timer()-start))
 
+krn['supply_buffers'](queue, (1,1), (1,1), current_buf, next_buf, np.int64(IMG_SIZE), np.int64(IMG_SIZE))
+
 total_step_time = 0
 total_steps = 0
 very_start=timer()
@@ -110,20 +116,15 @@ for step in range(SIM_STEPS):
     if(should_close.is_set()):
         break
 
-    if(step%1000==0):
-        krn['fractal_warp_noisefill'](queue, (IMG_SIZE,IMG_SIZE), None, oro_buf, 
-        NPFLOAT(SEED+1000*SIM_RATE*step/(1<<20)), NPFLOAT(1.0/PERIOD), NPFLOAT(1))
-
-    krn['orogeny'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf, oro_buf, NPFLOAT(0.001*SIM_RATE))
-    swap_buffers()
-    krn['gravity'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf, NPFLOAT(1), NPFLOAT(0.1 * SIM_RATE))
-    swap_buffers()
-    krn['hydro_precip'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf, NPFLOAT(0.001 * SIM_RATE))
-    swap_buffers()
-    krn['hydro_flow'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf, NPFLOAT(SIM_RATE))
-    swap_buffers()
-    krn['hydro_sink'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, next_buf, NPFLOAT(1))
-    swap_buffers()
+    krn['gravity'](queue, (IMG_SIZE,IMG_SIZE), None, NPFLOAT(1), NPFLOAT(SIM_RATE))
+    krn['copy_back'](queue, (IMG_SIZE,IMG_SIZE), None)
+    krn['hydro_precip'](queue, (IMG_SIZE,IMG_SIZE), None, NPFLOAT(0.001*SIM_RATE))
+    krn['copy_back'](queue, (IMG_SIZE,IMG_SIZE), None)
+    for p in range(9):
+        krn['hydro_flow_part'](queue, ((IMG_SIZE+2)//3,(IMG_SIZE+2)//3), None, np.int8(p), NPFLOAT(SIM_RATE))
+    krn['copy_back'](queue, (IMG_SIZE,IMG_SIZE), None)
+    krn['hydro_sink'](queue, (IMG_SIZE,IMG_SIZE), None, NPFLOAT(1))
+    krn['copy_back'](queue, (IMG_SIZE,IMG_SIZE), None)
 
     
     queue.finish()
