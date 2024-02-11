@@ -158,6 +158,26 @@ FLOAT fractal_warp_noise2(const FLOAT2 X, const FLOAT Z, const FLOAT min_f, cons
     return n/2;
 }
 
+FLOAT fractal_warp_norm_noise2(const FLOAT2 X, const FLOAT Z, const FLOAT min_f, const FLOAT max_f, const FLOAT warp_strength) {
+
+    FLOAT n=0;
+    FLOAT min_n=0;
+    FLOAT max_n=0;
+    FLOAT z=Z;
+    long o=1;
+
+    while(o * min_f <= max_f){
+        const FLOAT f = min_f * o;
+        n += warp_noise2(X*f, z*f, warp_strength)/o;
+        min_n += -1.0/o;
+        max_n += 1.0/o;
+        z += 8 + warp_strength;//needs extra padding for warp channels
+        o *= 2;
+    }
+
+    return (n-min_n)/(max_n-min_n);
+}
+
 kernel void noisefill(global FLOAT* field, const FLOAT Z, const FLOAT freq){
     FLOAT2 pos = (FLOAT2)(get_global_id(0),get_global_id(1));
     long lin_id = get_global_id(1) * get_global_size(0) + get_global_id(0);
@@ -173,13 +193,19 @@ kernel void warp_noisefill(global FLOAT* field, const FLOAT Z, const FLOAT freq,
 kernel void fractal_noisefill(global FLOAT* field, const FLOAT Z, const FLOAT freq){
     FLOAT2 pos = (FLOAT2)(get_global_id(0),get_global_id(1));
     long lin_id = get_global_id(1) * get_global_size(0) + get_global_id(0);
-    field[lin_id] = fractal_noise2(pos,Z,freq,0.25);
+    field[lin_id] = fractal_noise2(pos,Z,freq,MAX_NOISE_FREQ);
 }
 
 kernel void fractal_warp_noisefill(global FLOAT* field, const FLOAT Z, const FLOAT freq, const FLOAT warp_strength){
     FLOAT2 pos = (FLOAT2)(get_global_id(0),get_global_id(1));
     long lin_id = get_global_id(1) * get_global_size(0) + get_global_id(0);
-    field[lin_id] = fractal_warp_noise2(pos,Z,freq,0.25, warp_strength);
+    field[lin_id] = fractal_warp_noise2(pos,Z,freq,MAX_NOISE_FREQ, warp_strength);
+}
+
+kernel void fractal_warp_norm_noisefill(global FLOAT* field, const FLOAT Z, const FLOAT freq, const FLOAT warp_strength){
+    FLOAT2 pos = (FLOAT2)(get_global_id(0),get_global_id(1));
+    long lin_id = get_global_id(1) * get_global_size(0) + get_global_id(0);
+    field[lin_id] = fractal_warp_norm_noise2(pos,Z,freq,MAX_NOISE_FREQ, warp_strength);
 }
 
 

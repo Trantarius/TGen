@@ -12,18 +12,20 @@ import PIL
 from sys import getsizeof as sizeof
 from math import *
 import os 
+import contextlib
 
 this_file_path = os.path.dirname(os.path.realpath(__file__))
 print(this_file_path)
 
 #in pixels (AKA simulation units)
 #affects the size of the area simulated, not the accuracy
-IMG_SIZE=1024
+IMG_SIZE=2048
 #maximum, in sim units
 PERIOD=1024
 #modifier, unitless
 SLOPE=1
 SIM_STEPS=100000
+SIM_BATCH=100
 #modifier, lower increases stability
 SIM_RATE=0.25
 
@@ -83,7 +85,7 @@ mf = cl.mem_flags
 
 start=timer()
 with open('main.cl','r') as maincl:
-    prg = cl.Program(ctx, str(maincl.read())).build(options=[f'-I{this_file_path} -DFLOAT={FLOAT} -cl-std=CL2.0 -g'])
+    prg = cl.Program(ctx, str(maincl.read())).build(options=[f'-I{this_file_path} -DFLOAT={FLOAT} -cl-std=CL2.0'])
 krn={}
 for kernel in prg.all_kernels():
     krn[kernel.function_name]=kernel
@@ -95,44 +97,43 @@ current_buf = cl.Buffer(ctx, mf.READ_WRITE | mf.COPY_HOST_PTR, hostbuf=host_buf)
 oro_buf = cl.Buffer(ctx, mf.READ_WRITE | mf.COPY_HOST_PTR, hostbuf=tmp_buf)
 del tmp_buf
 next_buf = cl.Buffer(ctx, mf.READ_WRITE | mf.COPY_HOST_PTR, hostbuf=host_buf)
-def swap_buffers():
-    cl.enqueue_copy(queue, current_buf, next_buf)
-
-start=timer()
-krn['fractal_warp_noisefill'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, NPFLOAT(SEED), NPFLOAT(1.0/PERIOD), NPFLOAT(1))
-cl.enqueue_copy(queue,host_buf,current_buf)
-krn['map_range'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, 
-    NPFLOAT(np.min(host_buf)), NPFLOAT(np.max(host_buf)), NPFLOAT(0), NPFLOAT(VERT_RANGE))
-cl.enqueue_copy(queue, next_buf, current_buf)
-print("noisegen {:0.4f}s".format(timer()-start))
 
 krn['supply_buffers'](queue, (1,1), (1,1), current_buf, next_buf, np.int64(IMG_SIZE), np.int64(IMG_SIZE))
+
+start=timer()
+krn['init_height'](queue, (IMG_SIZE,IMG_SIZE), None, NPFLOAT(SEED), NPFLOAT(1.0/PERIOD), NPFLOAT(1), NPFLOAT(VERT_RANGE))
+queue.finish()
+print("noisegen {:0.4f}s".format(timer()-start))
 
 total_step_time = 0
 total_steps = 0
 very_start=timer()
-for step in range(SIM_STEPS):
-    start=timer()
+for batch in range(SIM_STEPS//SIM_BATCH):
     if(should_close.is_set()):
         break
 
-    krn['gravity'](queue, (IMG_SIZE,IMG_SIZE), None, NPFLOAT(1), NPFLOAT(SIM_RATE))
-    krn['copy_back'](queue, (IMG_SIZE,IMG_SIZE), None)
-    krn['hydro_precip'](queue, (IMG_SIZE,IMG_SIZE), None, NPFLOAT(0.001*SIM_RATE))
-    krn['copy_back'](queue, (IMG_SIZE,IMG_SIZE), None)
-    for p in range(9):
-        krn['hydro_flow_part'](queue, ((IMG_SIZE+2)//3,(IMG_SIZE+2)//3), None, np.int8(p), NPFLOAT(SIM_RATE))
-    krn['copy_back'](queue, (IMG_SIZE,IMG_SIZE), None)
-    krn['hydro_sink'](queue, (IMG_SIZE,IMG_SIZE), None, NPFLOAT(1))
-    krn['copy_back'](queue, (IMG_SIZE,IMG_SIZE), None)
-
+    for b in range(SIM_BATCH):
+        step = batch*SIM_BATCH + b
+        krn['orogeny'](queue, (IMG_SIZE,IMG_SIZE), None, NPFLOAT(SEED + step*SIM_RATE*0.0001), NPFLOAT(1.0/PERIOD), NPFLOAT(1), NPFLOAT(SIM_RATE))
+        krn['copy_back'](queue, (IMG_SIZE,IMG_SIZE), None)
+        krn['gravity'](queue, (IMG_SIZE,IMG_SIZE), None, NPFLOAT(1), NPFLOAT(SIM_RATE))
+        krn['copy_back'](queue, (IMG_SIZE,IMG_SIZE), None)
+        krn['hydro_precip'](queue, (IMG_SIZE,IMG_SIZE), None, NPFLOAT(0.001*SIM_RATE))
+        krn['copy_back'](queue, (IMG_SIZE,IMG_SIZE), None)
+        for p in range(9):
+            krn['hydro_flow_part'](queue, ((IMG_SIZE+2)//3,(IMG_SIZE+2)//3), None, np.int8(p), NPFLOAT(SIM_RATE))
+        krn['copy_back'](queue, (IMG_SIZE,IMG_SIZE), None)
+        krn['hydro_sink'](queue, (IMG_SIZE,IMG_SIZE), None, NPFLOAT(1))
+        krn['copy_back'](queue, (IMG_SIZE,IMG_SIZE), None)
     
+    start=timer()    
     queue.finish()
     elapsed=timer()-start
+
     total_step_time+=elapsed
-    total_steps+=1
+    total_steps+=SIM_BATCH
     print('\r',' '*50,end='')
-    print('\rstep {}\t{:0.4f}s'.format(step,elapsed),end='')
+    print('\rstep {}\t{:0.4f}s'.format(batch*SIM_BATCH,elapsed/SIM_BATCH),end='')
 
     #send image to be drawn if the drawer is ready, or if on the last step
     if(draw_ready.is_set() or step==SIM_STEPS-1):
@@ -148,14 +149,14 @@ print('\navg step time: {:0.4f}s'.format(total_step_time/total_steps))
 print('total time: {:0.4f}s'.format(total_elapsed))
 print('overhead: {:0.4f}s'.format(total_elapsed-total_step_time))
 
+start=timer()
 imdata = np.zeros((IMG_SIZE,IMG_SIZE),dtype=np.int32)
 imbuf = cl.Buffer(ctx, mf.READ_WRITE | mf.COPY_HOST_PTR, hostbuf=imdata)
-krn['map_range'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, NPFLOAT(0), NPFLOAT(VERT_RANGE), NPFLOAT(0), NPFLOAT(1))
-krn['to_int32'](queue, (IMG_SIZE,IMG_SIZE), None, current_buf, imbuf)
+krn['to_png'](queue, (IMG_SIZE, IMG_SIZE), None, current_buf, imbuf, np.int64(0), NPFLOAT(0), NPFLOAT(VERT_RANGE))
 cl.enqueue_copy(queue, imdata, imbuf)
-
 img = PIL.Image.fromarray(imdata,'I')
 img.save('out.png')
+print(f'out.png saved: {timer()-start:0.4f}s')
 
 
 while(not should_close.is_set()):

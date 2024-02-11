@@ -11,18 +11,13 @@ struct Data{
 
 global struct Data prev;
 global struct Data next;
-
 global long2 size;
 
-kernel void map_range(global FLOAT* field, const FLOAT src_low, const FLOAT src_high, 
-const FLOAT dst_low, const FLOAT dst_high){
-    long lin_id = get_global_id(1) * get_global_size(0) + get_global_id(0);
-    field[lin_id] = (field[lin_id]-src_low)/(src_high-src_low) * (dst_high-dst_low) + dst_low;
-}
 
-kernel void to_int32(global const FLOAT* field, global int* output){
-    long lin_id = get_global_id(1) * get_global_size(0) + get_global_id(0);
-    output[lin_id] = (int)(field[lin_id] * (FLOAT)0xffff);
+kernel void to_png(global const FLOAT* field, global int* output, const long sub_idx, const FLOAT vmin, const FLOAT vmax){
+    const long id = get_global_linear_id() + sub_idx * size.x * size.y;
+    const FLOAT normed = (field[id]-vmin)/(vmax-vmin);
+    output[get_global_linear_id()] = (int)(normed * (FLOAT)0xffff);
 }
 
 kernel void supply_buffers(global FLOAT* p_buf, global FLOAT* n_buf, long width, long height){
@@ -37,7 +32,7 @@ kernel void supply_buffers(global FLOAT* p_buf, global FLOAT* n_buf, long width,
 
 #define STD_KERNEL_START \
 const long id = get_global_linear_id(); \
-const long2 coord = (long2)(id % size.x, id / size.x); \
+const long2 coord = (long2)(get_global_id(0), get_global_id(1)); \
 if(coord.x<0 || coord.y<0 || coord.x>=size.x || coord.y>=size.y){ return; }
 
 kernel void copy_back(){
@@ -45,6 +40,18 @@ kernel void copy_back(){
     prev.water[get_global_linear_id()]=next.water[get_global_linear_id()];
     prev.sediment[get_global_linear_id()]=next.sediment[get_global_linear_id()];
 };
+
+kernel void init_height(const FLOAT Z, const FLOAT freq, const FLOAT warp_strength, const FLOAT max_height){
+    const FLOAT2 pos = (FLOAT2)(get_global_id(0), get_global_id(1));
+    prev.land[get_global_linear_id()] = fractal_warp_norm_noise2(pos,Z,freq,MAX_NOISE_FREQ, warp_strength) * max_height;
+    next.land[get_global_linear_id()] = prev.land[get_global_linear_id()];
+}
+
+kernel void orogeny(const FLOAT Z, const FLOAT freq, const FLOAT warp_strength, const FLOAT amount){
+    const FLOAT2 pos = (FLOAT2)(get_global_id(0), get_global_id(1));
+    next.land[get_global_linear_id()] = prev.land[get_global_linear_id()] +
+        fractal_warp_norm_noise2(pos,Z,freq,MAX_NOISE_FREQ, warp_strength) * amount;
+}
 
 kernel void gravity(const FLOAT repose, const FLOAT amount){
 
@@ -66,14 +73,7 @@ kernel void gravity(const FLOAT repose, const FLOAT amount){
             next.land[id] += amount * diff;
         }
     }
-};
-/*
-kernel void orogeny(global const FLOAT* input, global FLOAT* output, global const FLOAT* mask, const FLOAT amount){
-    const long2 coord = (long2)(get_global_id(0), get_global_id(1));
-    const long2 size = (long2)(get_global_size(0), get_global_size(1));
-    *land(output,coord,size) = *land(input,coord,size) + *land(mask,coord,size)*amount;
 }
-*/
 
 kernel void hydro_precip(const FLOAT amount){
     STD_KERNEL_START
@@ -87,7 +87,7 @@ kernel void hydro_sink(const FLOAT max_depth){
 
 kernel void hydro_flow_part(const char part, const FLOAT rate){
 
-    const long2 coord = (long2)(get_global_linear_id() % ((size.x+2)/3), get_global_linear_id() / ((size.x+2)/3)) * 3 + (long2)(part%3,part/3);
+    const long2 coord = (long2)(get_global_id(0), get_global_id(1)) * 3 + (long2)(part%3,part/3);
     const long id = coord.y * size.x + coord.x;
     if(coord.x<0 || coord.y<0 || coord.x>=size.x || coord.y>=size.y){ return; }
     //printf("%i (%i, %i)",(int)part, coord.x, coord.y);
