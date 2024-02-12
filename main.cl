@@ -1,5 +1,5 @@
 
-#include "opensimplex.cl"
+#include "noise.cl"
 #include "convolve.cl"
 #include "config.cl"
 
@@ -13,6 +13,12 @@ global struct Data prev;
 global struct Data next;
 global long2 size;
 
+// contains oro_levels+1 noisemaps. the map at 0 is the sum of the remaining maps.
+// each map is an octave of the generated noise, seperately updated when necessary.
+global FLOAT* global oro_buffer;
+global FLOAT* global oro_update_times;
+global long oro_levels;
+global ulong oro_seed;
 
 kernel void to_png(global const FLOAT* field, global int* output, const long sub_idx, const FLOAT vmin, const FLOAT vmax){
     const long id = get_global_linear_id() + sub_idx * size.x * size.y;
@@ -41,16 +47,19 @@ kernel void copy_back(){
     prev.sediment[get_global_linear_id()]=next.sediment[get_global_linear_id()];
 };
 
-kernel void init_height(const FLOAT Z, const FLOAT freq, const FLOAT warp_strength, const FLOAT max_height){
-    const FLOAT2 pos = (FLOAT2)(get_global_id(0), get_global_id(1));
-    prev.land[get_global_linear_id()] = fractal_warp_norm_noise2(pos,Z,freq,MAX_NOISE_FREQ, warp_strength) * max_height;
+kernel void init_height(const ulong seed, const FLOAT freq, const FLOAT warp_strength, const FLOAT max_height){
+    if(get_global_linear_id()==0){
+        oro_seed=seed;
+    }
+    const FLOAT3 pos = (FLOAT3)(get_global_id(0), get_global_id(1), 0);
+    prev.land[get_global_linear_id()] = fractal_warp_noise3(seed, pos, freq, warp_strength) * max_height;
     next.land[get_global_linear_id()] = prev.land[get_global_linear_id()];
 }
 
-kernel void orogeny(const FLOAT Z, const FLOAT freq, const FLOAT warp_strength, const FLOAT amount){
-    const FLOAT2 pos = (FLOAT2)(get_global_id(0), get_global_id(1));
+kernel void orogeny(const FLOAT T, const FLOAT freq, const FLOAT warp_strength, const FLOAT amount){
+    const FLOAT3 pos = (FLOAT3)(get_global_id(0), get_global_id(1), T);
     next.land[get_global_linear_id()] = prev.land[get_global_linear_id()] +
-        fractal_warp_norm_noise2(pos,Z,freq,MAX_NOISE_FREQ, warp_strength) * amount;
+        fractal_warp_noise3(oro_seed, pos, freq, warp_strength) * amount;
 }
 
 kernel void gravity(const FLOAT repose, const FLOAT amount){

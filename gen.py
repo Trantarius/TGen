@@ -15,16 +15,16 @@ import os
 import contextlib
 
 this_file_path = os.path.dirname(os.path.realpath(__file__))
-print(this_file_path)
+print(hex(random.getrandbits(64)))
 
 #in pixels (AKA simulation units)
 #affects the size of the area simulated, not the accuracy
-IMG_SIZE=2048
+IMG_SIZE=1024
 #maximum, in sim units
 PERIOD=1024
 #modifier, unitless
 SLOPE=1
-SIM_STEPS=100000
+SIM_STEPS=10000
 SIM_BATCH=100
 #modifier, lower increases stability
 SIM_RATE=0.25
@@ -32,7 +32,7 @@ SIM_RATE=0.25
 #in sim units
 VERT_RANGE= SLOPE*PERIOD/8
 print("VERT_RANGE: {:.0f}".format(VERT_RANGE))
-SEED=random.random()*(1<<10)
+SEED=np.uint64(random.getrandbits(64))
 
 BUF_SHAPE=(3,IMG_SIZE,IMG_SIZE)
 BUF_LAND=0
@@ -42,7 +42,8 @@ BUF_SEDIMENT=2
 FLOAT='float'
 NPFLOAT=np.float32
 
-draw_queue = mp.Queue()
+mgr = mp.Manager()
+draw_queue = mgr.Queue()
 should_close=mp.Event()
 stop_drawing=mp.Event()
 draw_ready = mp.Event()
@@ -51,7 +52,7 @@ def draw():
 
     matplotlib.use('GTK3Agg')
     plt.ion()
-    fig = plt.figure(figsize=(12,12))
+    fig = plt.figure(figsize=(12,12), num='Terrain')
     plt.axes((0,0,1,1))
     def on_close(*_):
         global should_close
@@ -101,7 +102,7 @@ next_buf = cl.Buffer(ctx, mf.READ_WRITE | mf.COPY_HOST_PTR, hostbuf=host_buf)
 krn['supply_buffers'](queue, (1,1), (1,1), current_buf, next_buf, np.int64(IMG_SIZE), np.int64(IMG_SIZE))
 
 start=timer()
-krn['init_height'](queue, (IMG_SIZE,IMG_SIZE), None, NPFLOAT(SEED), NPFLOAT(1.0/PERIOD), NPFLOAT(1), NPFLOAT(VERT_RANGE))
+krn['init_height'](queue, (IMG_SIZE,IMG_SIZE), None, SEED, NPFLOAT(1.0/PERIOD), NPFLOAT(0), NPFLOAT(VERT_RANGE))
 queue.finish()
 print("noisegen {:0.4f}s".format(timer()-start))
 
@@ -114,8 +115,8 @@ for batch in range(SIM_STEPS//SIM_BATCH):
 
     for b in range(SIM_BATCH):
         step = batch*SIM_BATCH + b
-        krn['orogeny'](queue, (IMG_SIZE,IMG_SIZE), None, NPFLOAT(SEED + step*SIM_RATE*0.0001), NPFLOAT(1.0/PERIOD), NPFLOAT(1), NPFLOAT(SIM_RATE))
-        krn['copy_back'](queue, (IMG_SIZE,IMG_SIZE), None)
+        #krn['orogeny'](queue, (IMG_SIZE,IMG_SIZE), None, NPFLOAT(step*SIM_RATE/10), NPFLOAT(1.0/PERIOD), NPFLOAT(1), NPFLOAT(SIM_RATE))
+        #krn['copy_back'](queue, (IMG_SIZE,IMG_SIZE), None)
         krn['gravity'](queue, (IMG_SIZE,IMG_SIZE), None, NPFLOAT(1), NPFLOAT(SIM_RATE))
         krn['copy_back'](queue, (IMG_SIZE,IMG_SIZE), None)
         krn['hydro_precip'](queue, (IMG_SIZE,IMG_SIZE), None, NPFLOAT(0.001*SIM_RATE))
@@ -136,18 +137,22 @@ for batch in range(SIM_STEPS//SIM_BATCH):
     print('\rstep {}\t{:0.4f}s'.format(batch*SIM_BATCH,elapsed/SIM_BATCH),end='')
 
     #send image to be drawn if the drawer is ready, or if on the last step
-    if(draw_ready.is_set() or step==SIM_STEPS-1):
+    if(draw_ready.is_set()):
         cl.enqueue_copy(queue,host_buf,current_buf)
         draw_queue.put(host_buf)
         draw_ready.clear()
 
-cl.enqueue_copy(queue, host_buf, current_buf, is_blocking=False)
-queue.finish()
+cl.enqueue_copy(queue, host_buf, current_buf)
+draw_queue.put(host_buf)
+
+print(np.min(host_buf[0]))
+print(np.max(host_buf[0]))
 
 total_elapsed = timer()-very_start
-print('\navg step time: {:0.4f}s'.format(total_step_time/total_steps))
-print('total time: {:0.4f}s'.format(total_elapsed))
-print('overhead: {:0.4f}s'.format(total_elapsed-total_step_time))
+if(SIM_STEPS!=0):
+    print('\navg step time: {:0.4f}s'.format(total_step_time/total_steps))
+    print('total time: {:0.4f}s'.format(total_elapsed))
+    print('overhead: {:0.4f}s'.format(total_elapsed-total_step_time))
 
 start=timer()
 imdata = np.zeros((IMG_SIZE,IMG_SIZE),dtype=np.int32)

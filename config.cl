@@ -21,3 +21,7 @@
 #ifndef MAX_NOISE_FREQ
 #define MAX_NOISE_FREQ ((FLOAT)0.25)
 #endif
+
+#ifndef NOISE_FUNCTION
+#define NOISE_FUNCTION valuenoise3
+#endif
